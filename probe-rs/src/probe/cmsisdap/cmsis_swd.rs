@@ -169,29 +169,29 @@ impl PendingBatch {
 
     /// Push every transfer `items` yields, or none of them when the packet runs out of room.
     ///
-    /// Returns whether they all fit. The whole run is rewound on the first one that does not, so a
-    /// run either travels in this packet or waits for the next one intact.
+    /// Returns whether they all fit. Every transfer of a run has the same size, so whether the run
+    /// fits is settled before any of it is added: it either travels in this packet or waits for
+    /// the next one intact.
     ///
     /// An empty packet always takes one transfer however small the packet is, or splitting a batch
     /// would never make progress.
-    fn push_all(
-        &mut self,
-        direction: Direction,
-        packet_size: u16,
-        items: impl IntoIterator<Item = (HandleId, RegisterAddress, u32, usize)>,
-    ) -> bool {
-        let mark = self.request.mark();
-        let transfers = self.transfers.len();
-        let writes_dp = self.writes_dp;
+    fn push_all<I>(&mut self, direction: Direction, packet_size: u16, items: I) -> bool
+    where
+        I: IntoIterator<Item = (HandleId, RegisterAddress, u32, usize)>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let items = items.into_iter();
+        let count = items.len();
+        let forced = self.is_empty() && count == 1;
+        if !forced
+            && !self
+                .request
+                .has_room_for_many(Self::rw(direction), count, packet_size)
+        {
+            return false;
+        }
 
         for (id, address, data, batch_index) in items {
-            if !self.request.has_room_for(Self::rw(direction), packet_size) && !self.is_empty() {
-                self.request.rewind(mark);
-                self.transfers.truncate(transfers);
-                self.writes_dp = writes_dp;
-                return false;
-            }
-
             if direction == Direction::Write && matches!(address, RegisterAddress::DpRegister(_)) {
                 self.writes_dp = true;
             }
@@ -1032,7 +1032,7 @@ mod tests {
     /// How many `rw` transfers one packet holds.
     fn transfers_that_fit(rw: RW, packet_size: u16) -> usize {
         let mut request = TransferRequest::empty();
-        while request.has_room_for(rw, packet_size) {
+        while request.has_room_for_many(rw, 1, packet_size) {
             match rw {
                 RW::R => request.add_read(RegisterAddress::ApRegister(0)),
                 RW::W => request.add_write(RegisterAddress::ApRegister(0), 0),
@@ -1188,7 +1188,7 @@ mod tests {
         assert!(packet.push_all(Direction::Write, 64, [item(&id, 0b0100, 0x2000_0000, 0)]));
         let (request, response) = packet.request.packet_lengths();
 
-        // Long enough to run out of room part way, which is what the rewind is for.
+        // Long enough to run out of room part way.
         let run = (0..40).map(|i| item(&id, 0b1100, 0, i + 1));
         assert!(!packet.push_all(Direction::Read, 64, run));
 
